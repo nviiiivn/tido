@@ -44,7 +44,8 @@
       <div class="map-legend" aria-hidden="true">
         <span><i class="lg lg-g"></i>GAUGE</span>
         <span><i class="lg lg-b"></i>BUOY</span>
-        <span><i class="lg lg-m"></i>WIND STN</span>
+        <span><i class="lg lg-m"></i>MET STN</span>
+        <span><i class="lg lg-u"></i>STREAM</span>
         <span><i class="lg lg-r"></i>FLOOD RPT</span>
         <span><i class="lg lg-al"></i>ALERT</span>
         <span><i class="lg lg-a"></i>NWS FLOOD AREA</span>
@@ -96,9 +97,20 @@
       </div>
     </section>
 
-    <section class="tables" aria-label="Raw readings">
-      <div class="tbl"><div class="tbl-h">GAUGE ROSTER <span>LATEST · FT MLLW</span></div><div class="tbl-b"><table id="t-g"></table></div></div>
-      <div class="tbl"><div class="tbl-h">BUOY + WIND ROSTER <span>LATEST · FT · S · KT · °F</span></div><div class="tbl-b"><table id="t-b"></table></div></div>
+    <section class="tables" aria-label="Station rosters and raw readings">
+      <div class="tbl roster">
+        <div class="tbl-h tabs" role="tablist" aria-label="Station roster" id="r-tabs">
+          <button type="button" role="tab" id="tab-g" data-tab="g" aria-controls="t-g" aria-selected="true">TIDE <i id="n-g">0</i></button>
+          <button type="button" role="tab" id="tab-b" data-tab="b" aria-controls="t-b" aria-selected="false" tabindex="-1">BUOY + MET <i id="n-b">0</i></button>
+          <button type="button" role="tab" id="tab-u" data-tab="u" aria-controls="t-u" aria-selected="false" tabindex="-1">STREAM <i id="n-u">0</i></button>
+          <span class="tab-note" id="tab-note">LATEST · FT MLLW</span>
+        </div>
+        <div class="tbl-b">
+          <table id="t-g" role="tabpanel" aria-labelledby="tab-g"></table>
+          <table id="t-b" role="tabpanel" aria-labelledby="tab-b" hidden></table>
+          <table id="t-u" role="tabpanel" aria-labelledby="tab-u" hidden></table>
+        </div>
+      </div>
       <div class="tbl"><div class="tbl-h" id="t-raw-h">RAW FEED</div><div class="tbl-b"><table id="t-raw"></table></div></div>
     </section>
   </main>
@@ -108,7 +120,6 @@
       <span class="mh">REGION <kbd>R</kbd></span>
       <button type="button" role="radio" data-region="sfbay">SFBAY</button>
       <button type="button" role="radio" data-region="puget">PUGET</button>
-      <button type="button" role="radio" data-region="la">LA</button>
       <button type="button" role="radio" data-region="sfla">SFLA</button>
     </div>
     <div class="mgrp" role="radiogroup" aria-label="Timeline" id="m-win">
@@ -122,6 +133,7 @@
       <span class="mh">LAYERS</span>
       <button type="button" data-layer="g" aria-label="Gauges"><kbd>G</kbd><span class="w">AUGES</span></button>
       <button type="button" data-layer="b" aria-label="Buoys"><kbd>B</kbd><span class="w">UOYS</span></button>
+      <button type="button" data-layer="u" aria-label="Stream gauges"><kbd>S</kbd><span class="w">TREAM</span></button>
       <button type="button" data-layer="r" aria-label="Flood reports"><kbd>F</kbd><span class="w">LOOD RPTS</span></button>
       <button type="button" data-layer="a" aria-label="NWS flood alerts"><kbd>A</kbd><span class="w">LERTS</span></button>
     </div>
@@ -134,7 +146,7 @@
   </nav>
 
   <footer class="ft">
-    <span>data: NOAA CO-OPS · NDBC · NWS</span>
+    <span>data: NOAA CO-OPS · NDBC · NWS · USGS · NOAA NWPS · NWS storm reports via IEM · SF 311 (DataSF)</span>
     <span class="ft-map">map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors · <a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> · <a href="https://tiles.openstreetmap.us/" target="_blank" rel="noopener">OSM US</a></span>
   </footer>
 
@@ -144,7 +156,8 @@
       <dt>J / K &nbsp;·&nbsp; ← / →</dt><dd>NEXT / PREVIOUS STATION</dd>
       <dt>1 2 3 4</dt><dd>TIMELINE 1H · 6H · 24H · 3D</dd>
       <dt>R / SHIFT+R</dt><dd>NEXT / PREVIOUS REGION</dd>
-      <dt>G B F A</dt><dd>GAUGES · BUOYS · FLOOD REPORTS · ALERTS</dd>
+      <dt>G B S F A</dt><dd>TIDE GAUGES · BUOYS · STREAM GAUGES · FLOOD REPORTS · ALERTS</dd>
+      <dt>← → ON ROSTER TABS</dt><dd>TIDE · BUOY + MET · STREAM ROSTER</dd>
       <dt>T</dt><dd>THEME LIGHT / CRT</dd>
       <dt>TAB</dt><dd>MOVE THROUGH MAP MARKERS, ROSTERS, MENU</dd>
       <dt>?  /  ESC</dt><dd>SHOW / HIDE THIS PANEL</dd>

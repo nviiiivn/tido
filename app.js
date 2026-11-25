@@ -1,5 +1,6 @@
-// TIDO: retro telemetry viewer for live tide gauges and wave buoys.
+// TIDO: retro telemetry viewer for live tide gauges, wave buoys and USGS stream gauges.
 // Data: same-origin snapshot routes (/snapshot/{group}?region=…), refreshed every 5 minutes.
+// Station kinds: "g" NOAA tide gauge, "b" NDBC buoy / met station, "u" USGS stream gauge.
 
 import { REGIONS, REGION_IDS, DEFAULT_REGION, regionOfStation } from "./regions.js";
 import { buildStyle, graticule, scanImage, applyPalette, PALETTES, THEMES } from "./mapstyle.js";
@@ -8,7 +9,7 @@ import { lineGraph, vMeter, hMeter, fmtNum, esc } from "./gfx.js";
 const MIN = 60e3, HOUR = 60 * MIN;
 const WINS = { "1h": HOUR, "6h": 6 * HOUR, "24h": 24 * HOUR, "3d": 72 * HOUR };
 const WIN_IDS = Object.keys(WINS);
-const GROUPS = ["tides", "buoys", "weather", "floods"];
+const GROUPS = ["tides", "buoys", "weather", "floods", "gauges"];
 const REFRESH_MS = 5 * MIN;
 const ALERT_KM = 10; // NWS coastal flood polygon within this distance of a station
 const REPORT_KM = 15; // flood reports / flooding river+tide gauges within this distance
@@ -18,6 +19,9 @@ const WIND = { y: 21, r: 34 }; // kt: small-craft range, gale force
 const PERIOD = { y: 14, r: 18 }; // s
 const RES = { y: 1, r: 2 }; // ft above prediction
 const FLOOD_EV = /coastal flood|storm surge|tidal flood|lakeshore flood/i;
+const RIVER_EV = /flood/i; // stream gauges: any NWS flood product (watch, warning, flash flood, coastal)
+const RIVER_KM = 3; // a flooding NWPS gauge this close is taken as the same stream site
+const RISE = { y: 1, r: 2 }; // ft per 24 h, stream gauge rise
 const MARINE_EV = /gale|storm warning|small craft|high surf|hazardous seas|hurricane|tropical storm|special marine/i;
 const KIND_RANK = { warning: 3, watch: 2, advisory: 1, statement: 0 };
 
@@ -30,7 +34,8 @@ const state = {
   selId: null,
   want: null, // the station the viewer asked for (hash, saved pick, or region default)
   theme: "light",
-  layers: { g: true, b: true, r: true, a: true },
+  layers: { g: true, b: true, u: true, r: true, a: true },
+  tab: "g", // roster tab
   data: null,
   gen: 0,
   fetchedAt: 0,
@@ -154,9 +159,9 @@ function distToGeom(lon, lat, g) {
 function buildData(region, settled, now) {
   const val = (i) => (settled[i].status === "fulfilled" ? settled[i].value : null);
   const errors = settled.map((s, i) => (s.status === "rejected" ? `${GROUPS[i].toUpperCase()}: ${s.reason?.message || s.reason}` : null)).filter(Boolean);
-  const tides = val(0), buoys = val(1), weather = val(2), floods = val(3);
+  const tides = val(0), buoys = val(1), weather = val(2), floods = val(3), streams = val(4);
   // upstream stations the data server could not reach this round
-  for (const [name, snap] of [["TIDES", tides], ["BUOYS", buoys]]) for (const e of snap?.data?.errors || []) errors.push(`${name}: ${e}`);
+  for (const [name, snap] of [["TIDES", tides], ["BUOYS", buoys], ["USGS", streams]]) for (const e of snap?.data?.errors || []) errors.push(`${name}: ${e}`);
 
   const gauges = (tides?.data?.stations || []).map((s) => {
     const obs = decodeSeries(s.observed);
@@ -173,22 +178,44 @@ function buildData(region, settled, now) {
   const bs = (buoys?.data?.buoys || []).map((b) => ({
     kind: "b", id: String(b.id), name: b.name, lon: b.lon, lat: b.lat,
     waveFt: b.waveFt ?? null, period: b.period ?? null, windKt: b.windKt ?? null, windDir: b.windDir ?? null,
-    sstF: b.sstF ?? null, updated: b.updated ?? null,
-    wave: decodeSeries(b.series?.waveFt), sst: decodeSeries(b.series?.sstF),
+    sstF: b.sstF ?? null, updated: b.updated ?? null, levelFt: b.levelFt ?? null,
+    wave: decodeSeries(b.series?.waveFt), sst: decodeSeries(b.series?.sstF), level: decodeSeries(b.series?.levelFt),
   }));
-  // shore/pier met stations (names end "(wind…)") report no waves
-  for (const b of bs) b.windOnly = !b.wave.length && b.waveFt == null;
+  // shore/pier met stations (names end "(wind…)", "(level…)") report no waves; some report water level (NDBC TIDE)
+  for (const b of bs) {
+    b.windOnly = !b.wave.length && b.waveFt == null;
+    b.hasLevel = b.level.length > 0 || b.levelFt != null;
+  }
+  // USGS stage is against each gauge's own zero: only ever compared with itself over time
+  const usgs = (streams?.data?.gauges || []).map((g) => ({
+    kind: "u", id: String(g.id), name: g.name, lon: g.lon, lat: g.lat,
+    stageFt: g.stageFt ?? null, flowCfs: g.flowCfs ?? null, change24hFt: g.change24hFt ?? null, updated: g.updated ?? null,
+    stage: decodeSeries(g.series?.stageFt),
+  }));
+  for (const u of usgs) u.rate = rateSeries(u.stage);
   const alerts = expandAlerts(weather?.data?.alerts);
   const fd = floods?.data || {};
   const reports = (fd.reports || []).filter((r) => isFinite(r.lon) && isFinite(r.lat) && isFinite(r.t));
   const rivers = (fd.rivers?.flooding || []).filter((r) => isFinite(r.lon) && isFinite(r.lat));
 
-  const d = { region, gauges, buoys: bs, alerts, reports, rivers, errors, byId: new Map(), now };
-  for (const st of [...gauges, ...bs]) {
+  const d = { region, gauges, buoys: bs, usgs, alerts, reports, rivers, errors, byId: new Map(), now };
+  for (const st of [...gauges, ...bs, ...usgs]) {
     d.byId.set(st.id, st);
     annotate(st, d, now);
   }
   return d;
+}
+
+/** Stage change over the previous hour (ft/h) at each reading. */
+function rateSeries(pts) {
+  const out = [];
+  let j = 0;
+  for (let i = 0; i < pts.length; i++) {
+    while (j < i && pts[i].t - pts[j].t > HOUR) j++;
+    const dt = pts[i].t - pts[j].t;
+    if (j < i && dt >= 0.5 * HOUR) out.push({ t: pts[i].t, v: Math.round(((pts[i].v - pts[j].v) / dt) * HOUR * 100) / 100 });
+  }
+  return out;
 }
 
 function floodLevel(g) {
@@ -208,9 +235,11 @@ function annotate(st, d, now) {
     const isFlood = FLOOD_EV.test(p.event || "");
     // buoys: marine warnings only (small-craft advisories cover nearly every buoy most days)
     const isMarine = st.kind === "b" && MARINE_EV.test(p.event || "") && (p.kind || d.alerts.items[p.id]?.kind) === "warning";
-    if (!isFlood && !isMarine) continue;
+    // stream gauges: inland flood watches/warnings whose area holds the gauge
+    const isRiver = st.kind === "u" && !isFlood && RIVER_EV.test(p.event || "");
+    if (!isFlood && !isMarine && !isRiver) continue;
     const dist = distToGeom(st.lon, st.lat, f.geometry);
-    if (dist <= (isFlood ? ALERT_KM : 0.5)) {
+    if (dist <= (isFlood ? ALERT_KM : isRiver ? 2 : 0.5)) {
       const item = d.alerts.items[p.id] || {};
       seen.set(p.id, { event: p.event, kind: p.kind || item.kind || "statement", ends: item.ends });
     }
@@ -222,6 +251,12 @@ function annotate(st, d, now) {
   if (st.kind === "g") {
     st.floodLvl = floodLevel(st);
     st.stale = !st.latest || now - st.latest.t > 45 * MIN;
+  } else if (st.kind === "u") {
+    // no flood stage in the USGS feed: FLOOD lights only when NOAA's river service reports flooding at this site
+    const site = st.riversNear.filter((r) => km(st, r) <= RIVER_KM && ["minor", "moderate", "major"].includes(r.now));
+    st.floodLvl = site.length ? String(site[0].now).toUpperCase() : null;
+    st.stale = !st.updated || now - st.updated > 3 * HOUR;
+    st.trend = st.change24hFt == null ? 0 : st.change24hFt >= 0.1 ? 1 : st.change24hFt <= -0.1 ? -1 : 0;
   } else {
     st.gale = st.windKt != null && st.windKt >= WIND.r;
     st.stale = !st.updated || now - st.updated > 3 * HOUR;
@@ -240,7 +275,7 @@ function savePick(region, id) {
 const wantFor = (region) => savedPicks()[region] || DEFAULT_STATION[region] || null;
 function pickStation(d) {
   for (const id of [state.want, wantFor(d.region)]) if (id && d.byId.has(id)) return id;
-  return d.gauges[0]?.id || d.buoys[0]?.id || null;
+  return d.gauges[0]?.id || d.buoys[0]?.id || d.usgs[0]?.id || null;
 }
 
 async function load({ force = false, fit = false } = {}) {
@@ -251,7 +286,7 @@ async function load({ force = false, fit = false } = {}) {
   if (token !== state.gen || region !== state.region) return;
   const now = Date.now();
   const d = buildData(region, settled, now);
-  if (!d.gauges.length && !d.buoys.length) {
+  if (!d.gauges.length && !d.buoys.length && !d.usgs.length) {
     setLink("lost", d.errors[0]);
     if (!state.data || state.data.region !== region) { state.data = d; renderAll(); }
     return;
@@ -264,7 +299,9 @@ async function load({ force = false, fit = false } = {}) {
     const id = state.want;
     if (!d.byId.has(id)) locateStation(id).then((r) => { if (r && r !== state.region) { setRegion(r); state.want = id; } });
   }
+  const prevSel = state.selId;
   state.selId = pickStation(d);
+  if (state.selId !== prevSel && d.byId.has(state.selId)) state.tab = d.byId.get(state.selId).kind;
   renderAll();
   if (fit || state.needFit) fitRegion();
 }
@@ -374,9 +411,8 @@ function renderMarkers() {
   markers.clear();
   const d = state.data;
   if (!map || !d) return;
-  for (const st of [...d.gauges, ...d.buoys]) {
-    const kindName = st.kind === "g" ? "Tide gauge" : st.windOnly ? "Wind station" : "Buoy";
-    const el = markerEl(`mk-${st.kind}${st.windOnly ? " met" : ""}`, `${kindName} ${st.name}, ${st.id}`, `${st.name} · ${st.id}`);
+  for (const st of allStations(d)) {
+    const el = markerEl(`mk-${st.kind}${st.windOnly ? " met" : ""}`, `${kindName(st)} ${st.name}, ${st.id}`, `${st.name} · ${st.id}`);
     el.dataset.id = st.id;
     el.innerHTML = `<i class="shape"></i><span class="lbl">${esc(shortName(st.name).toUpperCase())}</span>`;
     el.addEventListener("click", (e) => { e.stopPropagation(); select(st.id); });
@@ -394,6 +430,8 @@ function updateMarkerStates() {
     el.classList.toggle("alert", !!st.alert && !st.floodLvl);
     el.classList.toggle("w1", st.kind === "b" && st.waveLvl === 1);
     el.classList.toggle("w2", st.kind === "b" && st.waveLvl === 2);
+    el.classList.toggle("up", st.kind === "u" && st.trend > 0);
+    el.classList.toggle("down", st.kind === "u" && st.trend < 0);
     el.classList.toggle("stale", !!st.stale);
     el.setAttribute("aria-pressed", st.id === state.selId ? "true" : "false");
   }
@@ -437,7 +475,7 @@ function renderAlertsLayer() {
 
 function applyLayers() {
   const box = $("map");
-  for (const k of ["g", "b", "r"]) box.classList.toggle(`hide-${k}`, !state.layers[k]);
+  for (const k of ["g", "b", "u", "r"]) box.classList.toggle(`hide-${k}`, !state.layers[k]);
   if (mapReady) for (const id of ["alerts-fill", "alerts-line"]) map.setLayoutProperty(id, "visibility", state.layers.a ? "visible" : "none");
   for (const b of document.querySelectorAll("#m-layers [data-layer]")) b.setAttribute("aria-pressed", state.layers[b.dataset.layer] ? "true" : "false");
 }
@@ -470,11 +508,11 @@ function renderHeader() {
   const el = $("hd-alert");
   if (!d || d.region !== state.region) { el.innerHTML = `<span class="dimt">ACQUIRING ${esc(r.code)}…</span>`; return; }
   const parts = [];
-  const flooding = d.gauges.filter((g) => g.floodLvl);
+  const flooding = [...d.gauges, ...d.usgs].filter((g) => g.floodLvl);
   if (flooding.length) parts.push(`<span class="tag fl">FLOOD</span><span>${flooding.map((g) => esc(g.name.toUpperCase())).join(", ")}</span>`);
   const counts = new Map();
   for (const it of Object.values(d.alerts?.items || {})) {
-    if (!FLOOD_EV.test(it.event || "")) continue;
+    if (!RIVER_EV.test(it.event || "")) continue; // coastal and inland flood products
     const k = it.event.toUpperCase();
     counts.set(k, { n: (counts.get(k)?.n || 0) + 1, rank: KIND_RANK[it.kind] ?? 0 });
   }
@@ -487,14 +525,26 @@ function renderHeader() {
     if (d.rivers.length) bits.push(`${d.rivers.length} NWPS GAUGE${d.rivers.length > 1 ? "S" : ""} FLOODING`);
     parts.push(`<span class="tag">ALERT</span><span>${bits.join(" · ")}</span>`);
   }
-  if (!parts.length) parts.push(`<span class="dimt">NO COASTAL FLOOD ALERTS · ${d.gauges.length} GAUGES · ${d.buoys.length} BUOYS NOMINAL</span>`);
+  if (!parts.length) parts.push(`<span class="dimt">NO FLOOD ALERTS · ${d.gauges.length} TIDE · ${d.buoys.length} BUOY · ${d.usgs.length} STREAM NOMINAL</span>`);
   el.innerHTML = parts.join(" ");
   el.title = el.textContent;
 }
 
 // ---------------------------------------------------------------- station panels
 const cur = () => state.data?.byId.get(state.selId) || null;
-const shortName = (name) => name.replace(/\s*\(wind[^)]*\)\s*$/i, "");
+// station-type suffixes the data server adds to NDBC names: "(wind)", "(level, water temp)", …
+const shortName = (name) => name.replace(/\s*\((?:wind|level|water)[^)]*\)\s*$/i, "");
+const allStations = (d) => [...d.gauges, ...d.buoys, ...d.usgs];
+const KIND_LABEL = { g: "TIDE", b: "BUOY + MET", u: "STREAM" };
+function kindName(st) {
+  if (st.kind === "g") return "Tide gauge";
+  if (st.kind === "u") return "USGS stream gauge";
+  return st.windOnly ? (st.hasLevel ? "Water level station" : "Wind station") : "Buoy";
+}
+const usgsUrl = (id) => `https://waterdata.usgs.gov/monitoring-location/${encodeURIComponent(id)}/`;
+const cfs = (v) => (v == null ? "--" : (v < 0 ? "−" : "") + Math.round(Math.abs(v)).toLocaleString("en-US"));
+const trendWord = (st) => (st.trend > 0 ? "RISING" : st.trend < 0 ? "FALLING" : "STEADY");
+const trendArrow = (st) => (st.trend > 0 ? "▲" : st.trend < 0 ? "▼" : "■");
 const sgn = (v, d = 2) => (v == null ? "--" : (v > 0 ? "+" : v < 0 ? "−" : "±") + Math.abs(v).toFixed(d));
 const num = (v, d = 1) => (v == null || !isFinite(v) ? "--" : fmtNum(v, d));
 const COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
@@ -530,6 +580,8 @@ function meterCols(el) {
 }
 
 function setText(id, s) { const el = $(id); if (el.textContent !== s) el.textContent = s; }
+// long readouts ("12.51", "−1.55") step the big digits down so they fit the box
+function fitReadout() { $("readout").classList.toggle("long", ($("ro-v").textContent || "").length >= 5); }
 function setLamp(id, label, on, blink) {
   const el = $(id);
   el.textContent = label;
@@ -543,7 +595,8 @@ function noData(id, msg) { $(id).innerHTML = `<div class="nodata">${esc(msg)}</d
 
 function whyLines(st) {
   const out = [];
-  if (st.floodLvl) out.push(`<b class="r">${st.floodLvl} FLOOD · ≥ ${st.flood[st.floodLvl.toLowerCase()]?.toFixed(2) ?? st.flood.minor.toFixed(2)} FT</b>`);
+  if (st.floodLvl && st.kind === "u") out.push(`<b class="r">NWPS: ${st.floodLvl} FLOOD AT THIS SITE</b>`);
+  else if (st.floodLvl) out.push(`<b class="r">${st.floodLvl} FLOOD · ≥ ${st.flood[st.floodLvl.toLowerCase()]?.toFixed(2) ?? st.flood.minor.toFixed(2)} FT</b>`);
   if (st.gale) out.push(`<b class="r">GALE FORCE WIND ${Math.round(st.windKt)} KT</b>`);
   const evs = new Map();
   for (const a of st.alerts) evs.set(a.event.toUpperCase(), a);
@@ -580,9 +633,11 @@ function renderStation() {
   const W = WINS[state.win];
   const tz = R().tz;
   if (st.kind === "g") renderGauge(st, now, W, tz);
+  else if (st.kind === "u") renderStream(st, now, W, tz);
   else renderBuoy(st, now, W, tz);
   $("ro-why").innerHTML = whyLines(st);
   $("readout").classList.toggle("alarm", !!st.floodLvl);
+  fitReadout();
   renderIdent(st, tz);
   renderRaw(st, now, W, tz);
 }
@@ -669,12 +724,30 @@ function renderGauge(st, now, W, tz) {
   setLegend("g2-leg", [["obs", "RESIDUAL"], ["zero", "ZERO"]]);
 }
 
+/** Scale for a series that is only compared with itself: its own range, padded to whole feet. */
+function ownScale(pts, minSpan = 0.5) {
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+  if (!isFinite(lo)) return null;
+  const step = hi - lo < 3 ? 0.5 : 1;
+  lo = Math.floor(lo / step) * step;
+  hi = Math.ceil(hi / step) * step;
+  if (hi - lo < minSpan) hi = lo + minSpan;
+  return { min: lo, max: hi };
+}
+
 function renderBuoy(st, now, W, tz) {
   const x0 = now - W, x1 = now + W * 0.05;
   const waveW = st.wave.filter((p) => p.t >= x0);
+  const levelW = st.level.filter((p) => p.t >= x0);
+  const levelMode = st.windOnly && st.hasLevel; // Everglades / Florida Bay stations: water level, no waves
   let mx = null;
   for (const p of waveW) if (mx == null || p.v > mx) mx = p.v;
-  if (st.windOnly) {
+  if (levelMode) {
+    setText("ro-k", "LEVEL");
+    setText("ro-v", st.levelFt == null ? "--.-" : st.levelFt.toFixed(2));
+    setText("ro-u", "FT");
+  } else if (st.windOnly) {
     setText("ro-k", "WIND");
     setText("ro-v", st.windKt == null ? "--" : String(Math.round(st.windKt)));
     setText("ro-u", "KT");
@@ -684,23 +757,32 @@ function renderBuoy(st, now, W, tz) {
     setText("ro-u", "FT");
   }
   const obsAt = `${st.updated ? hhmm(st.updated, tz) : "--:--"}${st.stale ? " · OLD" : ""}`;
+  const lvl = st.hasLevel ? ` · LEVEL <b>${num(st.levelFt, 2)}</b> FT` : "";
   $("ro-sub").innerHTML =
-    (st.windOnly ? `<span>OBS ${obsAt} · NO WAVE SENSOR</span>` : `<span>NOW <b>${num(st.waveFt)}</b> FT · ${obsAt}</span>`) +
-    `<span>SST <b>${num(st.sstF)}</b>°F · WIND <b>${st.windKt == null ? "--" : Math.round(st.windKt)}</b> KT ${compass(st.windDir)}</span>`;
+    (levelMode ? `<span>LEVEL <b>${num(st.levelFt, 2)}</b> FT · ${obsAt}</span>`
+      : st.windOnly ? `<span>OBS ${obsAt} · NO WAVES</span>` : `<span>NOW <b>${num(st.waveFt)}</b> FT · ${obsAt}</span>`) +
+    `<span>SST <b>${num(st.sstF)}</b>°F · WIND <b>${st.windKt == null ? "--" : Math.round(st.windKt)}</b> KT ${compass(st.windDir)}</span>` +
+    (lvl && !levelMode ? `<span>${lvl.slice(3)}</span>` : "");
   setLamp("lamp1", "GALE", st.gale, st.gale);
   setLamp("lamp2", "ALERT", st.alert, false);
 
   const vm = $("vm");
-  if (!waveW.length) noData("vm", st.windOnly ? "NO WAVE SENSOR" : "NO SIGNAL");
-  else {
+  if (waveW.length) {
     const top = Math.max(16, Math.ceil((mx ?? 0) * 1.15));
     vMeter(vm, {
       cols: bins(st.wave, x0, now, meterCols(vm)), min: 0, max: top, yellowAt: WAVE.y, redAt: WAVE.r,
       marks: [{ v: WAVE.y, label: `${WAVE.y}`, cls: "yel" }, { v: WAVE.r, label: `${WAVE.r}`, cls: "red" }],
       label: "Wave height history",
     });
+    setText("vm-l", "WAVE HEIGHT · FT");
+  } else if (levelW.length) {
+    const sc = ownScale(st.level);
+    vMeter(vm, { cols: bins(st.level, x0, now, meterCols(vm)), min: sc.min, max: sc.max, yellowAt: Infinity, redAt: Infinity, label: "Water level history" });
+    setText("vm-l", "WATER LEVEL · FT");
+  } else {
+    noData("vm", st.windOnly ? "NO WAVE SENSOR" : "NO SIGNAL");
+    setText("vm-l", "WAVE HEIGHT · FT");
   }
-  setText("vm-l", "WAVE HEIGHT · FT");
 
   if (st.windKt != null) hMeter($("hm1"), { value: st.windKt, min: 0, max: 50, yellowAt: WIND.y, redAt: WIND.r, marks: [{ v: WIND.r, cls: "red" }], label: "Wind speed" });
   else noData("hm1", "NO WIND SENSOR");
@@ -716,24 +798,98 @@ function renderBuoy(st, now, W, tz) {
 
   const ticks = timeTicks(x0, x1, tz, state.win);
   const hoverTime = (t) => hhmm(t, tz);
+  const levelGraph = (el, lab) => {
+    lineGraph(el, {
+      x: [x0, x1],
+      series: [{ name: "LEVEL", pts: st.level, cls: "obs", gap: 3 * HOUR }],
+      ticks, now: { t: now, label: st.levelFt != null ? st.levelFt.toFixed(2) : "" },
+      digits: 2, minSpan: 0.5, hoverTime, label: `Water level, ${st.name}`, empty: "NO SIGNAL",
+    });
+    setText(lab, "WATER LEVEL · FT (NDBC TIDE)");
+  };
+  if (levelMode) {
+    levelGraph($("g1"), "g1-l");
+    setLegend("g1-leg", [["obs", "LEVEL"]]);
+  } else {
+    lineGraph($("g1"), {
+      x: [x0, x1],
+      series: [{ name: "WVHT", pts: st.wave, cls: "obs", gap: 3 * HOUR }],
+      hlines: [{ v: WAVE.y, label: `${WAVE.y} FT`, cls: "yel" }, { v: WAVE.r, label: `${WAVE.r} FT`, cls: "red" }],
+      ticks, now: { t: now, label: st.waveFt != null ? st.waveFt.toFixed(1) : "" },
+      digits: 1, minSpan: 1, hoverTime, label: `Significant wave height, ${st.name}`, empty: st.windOnly ? "NO WAVE SENSOR" : "NO SIGNAL",
+    });
+    setText("g1-l", "SIGNIFICANT WAVE HEIGHT · FT");
+    setLegend("g1-leg", [["obs", "WVHT"], ["yel", `${WAVE.y} FT`], ["red", `${WAVE.r} FT`]]);
+  }
+
+  // second graph: sea temperature, or water level when this buoy has level but no temperature
+  if (!st.sst.length && st.hasLevel && !levelMode) {
+    levelGraph($("g2"), "g2-l");
+    setLegend("g2-leg", [["obs", "LEVEL"]]);
+  } else {
+    lineGraph($("g2"), {
+      x: [x0, x1],
+      series: [{ name: "SST", pts: st.sst, cls: "obs", gap: 3 * HOUR }],
+      ticks, now: { t: now, label: st.sstF != null ? st.sstF.toFixed(1) : "" },
+      digits: 1, minSpan: 1, hoverTime, label: `Sea surface temperature, ${st.name}`, empty: "NO TEMP SENSOR",
+    });
+    setText("g2-l", "SEA SURFACE TEMP · °F");
+    setLegend("g2-leg", [["obs", "SST"]]);
+  }
+}
+
+// USGS stream gauge. Stage is measured from the gauge's own zero, so every scale here is this gauge's own range.
+function renderStream(st, now, W, tz) {
+  const x0 = now - W, x1 = now + W * 0.05;
+  const stageW = st.stage.filter((p) => p.t >= x0);
+  setText("ro-k", "STAGE");
+  setText("ro-v", st.stageFt == null ? "--.-" : fmtNum(st.stageFt, 2));
+  setText("ro-u", "FT");
+  const obsAt = `${st.updated ? hhmm(st.updated, tz) : "--:--"}${st.stale ? " · OLD" : ""}`;
+  $("ro-sub").innerHTML =
+    `<span>24H <b>${sgn(st.change24hFt)}</b> FT ${trendArrow(st)} ${trendWord(st)}</span>` +
+    `<span>FLOW <b>${cfs(st.flowCfs)}</b> CFS · ${obsAt}</span>`;
+  setLamp("lamp1", "FLOOD", st.floodLvl, st.floodLvl);
+  setLamp("lamp2", "ALERT", st.alert, false);
+
+  const vm = $("vm");
+  const sc = ownScale(st.stage);
+  if (stageW.length && sc) vMeter(vm, { cols: bins(st.stage, x0, now, meterCols(vm)), min: sc.min, max: sc.max, yellowAt: Infinity, redAt: Infinity, label: "Stage history" });
+  else noData("vm", "NO SIGNAL");
+  setText("vm-l", "STAGE · FT (OWN GAUGE ZERO)");
+
+  if (st.change24hFt != null) hMeter($("hm1"), { value: st.change24hFt, min: -3, max: 3, yellowAt: RISE.y, redAt: RISE.r, marks: [{ v: 0 }], label: "Stage change over 24 hours" });
+  else noData("hm1", "NO SIGNAL");
+  setText("hm1-v", sgn(st.change24hFt));
+  setText("hm1-u", "FT / 24H");
+  setText("hm1-l", `24 H CHANGE · ${trendWord(st)}`);
+
+  if (st.flowCfs != null) hMeter($("hm2"), { value: Math.log10(1 + Math.abs(st.flowCfs)), min: 0, max: 5, yellowAt: Infinity, redAt: Infinity, label: "Discharge, log scale" });
+  else noData("hm2", "NO FLOW DATA");
+  setText("hm2-v", cfs(st.flowCfs));
+  setText("hm2-u", "CFS");
+  setText("hm2-l", st.flowCfs != null && st.flowCfs < 0 ? "FLOW · REVERSED (TIDAL / PUMPED)" : "FLOW · LOG SCALE 1 → 100K CFS");
+
+  const ticks = timeTicks(x0, x1, tz, state.win);
+  const hoverTime = (t) => hhmm(t, tz);
   lineGraph($("g1"), {
     x: [x0, x1],
-    series: [{ name: "WVHT", pts: st.wave, cls: "obs", gap: 3 * HOUR }],
-    hlines: [{ v: WAVE.y, label: `${WAVE.y} FT`, cls: "yel" }, { v: WAVE.r, label: `${WAVE.r} FT`, cls: "red" }],
-    ticks, now: { t: now, label: st.waveFt != null ? st.waveFt.toFixed(1) : "" },
-    digits: 1, minSpan: 1, hoverTime, label: `Significant wave height, ${st.name}`, empty: st.windOnly ? "NO WAVE SENSOR" : "NO SIGNAL",
+    series: [{ name: "STAGE", pts: st.stage, cls: "obs", gap: 2 * HOUR }],
+    ticks, now: { t: now, label: st.stageFt != null ? st.stageFt.toFixed(2) : "" },
+    digits: 2, minSpan: 0.5, hoverTime, label: `Stage, ${st.name}`, empty: "NO SIGNAL",
   });
-  setText("g1-l", "SIGNIFICANT WAVE HEIGHT · FT");
-  setLegend("g1-leg", [["obs", "WVHT"], ["yel", `${WAVE.y} FT`], ["red", `${WAVE.r} FT`]]);
+  setText("g1-l", "STAGE · FT ABOVE GAUGE ZERO");
+  setLegend("g1-leg", [["obs", "STAGE"]]);
 
+  const lastRate = st.rate.length ? st.rate[st.rate.length - 1].v : null;
   lineGraph($("g2"), {
     x: [x0, x1],
-    series: [{ name: "SST", pts: st.sst, cls: "obs", gap: 3 * HOUR }],
-    ticks, now: { t: now, label: st.sstF != null ? st.sstF.toFixed(1) : "" },
-    digits: 1, minSpan: 1, hoverTime, label: `Sea surface temperature, ${st.name}`, empty: "NO TEMP SENSOR",
+    series: [{ name: "FT/H", pts: st.rate, cls: "obs", gap: 2 * HOUR }],
+    ticks, zero: true, now: { t: now, label: lastRate != null ? sgn(lastRate) : "" },
+    digits: 2, minSpan: 0.2, hoverTime, label: `Rate of stage change, ${st.name}`, empty: "NO SIGNAL",
   });
-  setText("g2-l", "SEA SURFACE TEMP · °F");
-  setLegend("g2-leg", [["obs", "SST"]]);
+  setText("g2-l", "RATE OF CHANGE · FT / HOUR");
+  setLegend("g2-leg", [["obs", "FT/H"], ["zero", "ZERO"]]);
 }
 
 function fitBadge() {
@@ -744,19 +900,33 @@ function fitBadge() {
 }
 
 function renderIdent(st, tz) {
-  const m = st.name.match(/^(.*?)\s*\((.*)\)\s*$/);
-  const main = (m ? m[1] : st.name).toUpperCase();
-  const extra = m && !/^wind/i.test(m[2]) ? `${m[2].toUpperCase()} ` : "";
-  const kindWord = st.kind === "g" ? "STATION" : st.windOnly ? "WIND STATION" : "BUOY";
+  let main, second;
+  if (st.kind === "u") {
+    const i = st.name.lastIndexOf(",");
+    main = (i > 0 ? st.name.slice(0, i) : st.name).toUpperCase();
+    second = `${i > 0 ? `${st.name.slice(i + 1).trim().toUpperCase()} · ` : ""}USGS GAUGE`;
+  } else {
+    const m = st.name.match(/^(.*?)\s*\((.*)\)\s*$/);
+    main = (m ? m[1] : st.name).toUpperCase();
+    const extra = m && !/^(wind|level|water)/i.test(m[2]) ? `${m[2].toUpperCase()} ` : "";
+    const kindWord = st.kind === "g" ? "STATION" : st.windOnly ? (st.hasLevel ? "LEVEL STATION" : "WIND STATION") : "BUOY";
+    second = `${extra}${kindWord}`;
+  }
   setText("badge-1", main);
-  setText("badge-2", `${extra}${kindWord}`);
+  setText("badge-2", second);
   $("badge").classList.toggle("alarm", !!st.floodLvl);
   fitBadge();
   const t = st.kind === "g" ? st.latest?.t : st.updated;
-  const meta = st.kind === "g"
-    ? `TIDE GAUGE ${st.id} · NOAA CO-OPS · DATUM MLLW · MHHW ${st.mhhw != null ? st.mhhw.toFixed(2) : "--"} · H2O ${st.temp ? st.temp.v.toFixed(1) + "°F" : "--"}`
-    : `${st.windOnly ? "MET STATION" : "WAVE BUOY"} ${st.id} · NOAA NDBC`;
-  setText("co-meta", `${meta} · LAST OBS ${t ? `${hhmm(t, tz)} ${tzAbbr(t, tz)} (${ago(t)})` : "--"}`);
+  const last = `LAST OBS ${t ? `${hhmm(t, tz)} ${tzAbbr(t, tz)} (${ago(t)})` : "--"}`;
+  let meta;
+  if (st.kind === "g") {
+    meta = esc(`TIDE GAUGE ${st.id} · NOAA CO-OPS · DATUM MLLW · MHHW ${st.mhhw != null ? st.mhhw.toFixed(2) : "--"} · H2O ${st.temp ? st.temp.v.toFixed(1) + "°F" : "--"} · ${last}`);
+  } else if (st.kind === "u") {
+    meta = `<a href="${esc(usgsUrl(st.id))}" target="_blank" rel="noopener">USGS ${esc(st.id)} ↗</a> · ${esc(`STAGE ABOVE GAUGE ZERO · ${last}`)}`;
+  } else {
+    meta = esc(`${st.windOnly ? "MET STATION" : "WAVE BUOY"} ${st.id} · NOAA NDBC${st.hasLevel ? " · LEVEL FROM NDBC TIDE" : ""} · ${last}`);
+  }
+  $("co-meta").innerHTML = meta;
   setText("co-line", `LATITUDE ${dms(st.lat, true)} - LONGITUDE ${dms(st.lon, false)}`);
 }
 
@@ -778,15 +948,27 @@ function renderRaw(st, now, W, tz) {
       rows += `<tr${cls}><td class="l">${ddhhmm(p.t, tz)}</td><td>${p.v.toFixed(2)}</td><td>${pv != null ? pv.toFixed(2) : "--"}</td><td>${res != null ? sgn(res) : "--"}</td></tr>`;
       n++;
     }
+  } else if (st.kind === "u") {
+    rows += `<thead><tr><th class="l">TIME</th><th>STAGE</th><th>FT/H</th></tr></thead><tbody>`;
+    const rate = new Map(st.rate.map((p) => [p.t, p.v]));
+    for (let i = st.stage.length - 1; i >= 0 && n < LIMIT; i--) {
+      const p = st.stage[i];
+      if (p.t < x0) break;
+      const r = rate.get(p.t);
+      rows += `<tr><td class="l">${ddhhmm(p.t, tz)}</td><td>${p.v.toFixed(2)}</td><td>${r != null ? sgn(r) : "--"}</td></tr>`;
+      n++;
+    }
   } else {
-    rows += `<thead><tr><th class="l">TIME</th><th>WVHT</th><th>SST</th></tr></thead><tbody>`;
+    rows += `<thead><tr><th class="l">TIME</th><th>WVHT</th><th>SST</th>${st.hasLevel ? "<th>LVL</th>" : ""}</tr></thead><tbody>`;
     const byT = new Map();
-    for (const p of st.wave) if (p.t >= x0) byT.set(p.t, { w: p.v });
-    for (const p of st.sst) if (p.t >= x0) byT.set(p.t, { ...(byT.get(p.t) || {}), s: p.v });
+    const put = (pts, k) => { for (const p of pts) if (p.t >= x0) byT.set(p.t, { ...(byT.get(p.t) || {}), [k]: p.v }); };
+    put(st.wave, "w");
+    put(st.sst, "s");
+    put(st.level, "l");
     const ts = [...byT.keys()].sort((a, b) => b - a).slice(0, LIMIT);
     for (const t of ts) {
       const r = byT.get(t);
-      rows += `<tr><td class="l">${ddhhmm(t, tz)}</td><td>${r.w != null ? r.w.toFixed(1) : "--"}</td><td>${r.s != null ? r.s.toFixed(1) : "--"}</td></tr>`;
+      rows += `<tr><td class="l">${ddhhmm(t, tz)}</td><td>${r.w != null ? r.w.toFixed(1) : "--"}</td><td>${r.s != null ? r.s.toFixed(1) : "--"}</td>${st.hasLevel ? `<td>${r.l != null ? r.l.toFixed(2) : "--"}</td>` : ""}</tr>`;
       n++;
     }
   }
@@ -795,38 +977,64 @@ function renderRaw(st, now, W, tz) {
   $("t-raw").innerHTML = rows;
 }
 
+const TAB_NOTE = { g: "LATEST · FT MLLW", b: "LATEST · FT · S · KT · °F", u: "LATEST · STAGE FROM EACH GAUGE'S OWN ZERO" };
 function renderRoster() {
   const d = state.data;
   const tz = R().tz;
-  if (!d) { $("t-g").innerHTML = ""; $("t-b").innerHTML = ""; return; }
-  const short = (s) => esc((s.length > 16 ? s.slice(0, 15) + "…" : s).toUpperCase());
+  const tabs = { g: d ? d.gauges.length : 0, b: d ? d.buoys.length : 0, u: d ? d.usgs.length : 0 };
+  for (const k of ["g", "b", "u"]) {
+    const tab = $(`tab-${k}`);
+    if (!tab) continue;
+    const on = state.tab === k;
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on ? 0 : -1;
+    $(`t-${k}`).hidden = !on;
+    $(`n-${k}`).textContent = String(tabs[k]);
+  }
+  if ($("tab-note")) $("tab-note").textContent = TAB_NOTE[state.tab] || "";
+  if (!d) { for (const k of ["g", "b", "u"]) $(`t-${k}`).innerHTML = ""; return; }
+  const short = (s) => esc((s.length > 22 ? s.slice(0, 21) + "…" : s).toUpperCase());
+  const btn = (s) => `<td class="l"><button type="button" class="rb" data-id="${esc(s.id)}" aria-label="Select ${esc(s.name)}">${esc(s.id)}</button></td>`;
+  const rowCls = (s, extra = "") => `${s.id === state.selId ? "sel" : ""}${s.stale ? " old" : ""}${extra}`;
+
   let g = `<thead><tr><th class="l">STN</th><th class="l">NAME</th><th>TIME</th><th>LVL</th><th>PRED</th><th>RES</th><th>MINOR</th><th>H2O°F</th><th>ST</th></tr></thead><tbody>`;
   for (const s of d.gauges) {
     const pv = s.latest ? s.pm.get(s.latest.t) : null;
     const st = s.floodLvl ? `<span class="r">FLD</span>` : s.alert ? `<span class="y">ALR</span>` : s.stale ? `<span class="dimt">OLD</span>` : "OK";
-    g += `<tr data-id="${esc(s.id)}" class="${s.id === state.selId ? "sel" : ""}${s.floodLvl ? " hot" : ""}${s.stale ? " old" : ""}">` +
-      `<td class="l"><button type="button" class="rb" data-id="${esc(s.id)}" aria-label="Select ${esc(s.name)}">${esc(s.id)}</button></td>` +
+    g += `<tr data-id="${esc(s.id)}" class="${rowCls(s, s.floodLvl ? " hot" : "")}">${btn(s)}` +
       `<td class="l">${short(s.name)}</td><td>${s.latest ? hhmm(s.latest.t, tz) : "--"}</td>` +
       `<td>${s.latest ? s.latest.v.toFixed(2) : "--"}</td><td>${pv != null ? pv.toFixed(2) : "--"}</td><td>${sgn(s.residual)}</td>` +
       `<td>${s.flood?.minor != null ? s.flood.minor.toFixed(2) : "--"}</td><td>${s.temp ? s.temp.v.toFixed(1) : "--"}</td><td>${st}</td></tr>`;
   }
-  if (!d.gauges.length) g += `<tr><td class="l dimt" colspan="9">NO GAUGE DATA</td></tr>`;
+  if (!d.gauges.length) g += `<tr><td class="l dimt" colspan="9">NO TIDE GAUGE DATA</td></tr>`;
   $("t-g").innerHTML = g + "</tbody>";
 
-  let b = `<thead><tr><th class="l">STN</th><th class="l">NAME</th><th>TIME</th><th>WVHT</th><th>DPD</th><th>WSPD</th><th>WDIR</th><th>SST</th><th>ST</th></tr></thead><tbody>`;
+  let b = `<thead><tr><th class="l">STN</th><th class="l">NAME</th><th>TIME</th><th>WVHT</th><th>DPD</th><th>WSPD</th><th>WDIR</th><th>SST</th><th>LVL</th><th>ST</th></tr></thead><tbody>`;
   for (const s of d.buoys) {
     const st = s.gale ? `<span class="r">GALE</span>` : s.alert ? `<span class="y">ALR</span>` : s.stale ? `<span class="dimt">OLD</span>` : "OK";
     const wcls = s.waveLvl === 2 ? "r" : s.waveLvl === 1 ? "y" : "";
-    b += `<tr data-id="${esc(s.id)}" class="${s.id === state.selId ? "sel" : ""}${s.stale ? " old" : ""}">` +
-      `<td class="l"><button type="button" class="rb" data-id="${esc(s.id)}" aria-label="Select ${esc(s.name)}">${esc(s.id)}</button></td>` +
+    b += `<tr data-id="${esc(s.id)}" class="${rowCls(s)}">${btn(s)}` +
       `<td class="l">${short(shortName(s.name))}</td><td>${s.updated ? hhmm(s.updated, tz) : "--"}</td>` +
       `<td><span class="${wcls}">${num(s.waveFt)}</span></td><td>${s.period ?? "--"}</td><td>${num(s.windKt)}</td>` +
-      `<td>${s.windDir != null ? String(s.windDir).padStart(3, "0") : "--"}</td><td>${num(s.sstF)}</td><td>${st}</td></tr>`;
+      `<td>${s.windDir != null ? String(s.windDir).padStart(3, "0") : "--"}</td><td>${num(s.sstF)}</td><td>${num(s.levelFt, 2)}</td><td>${st}</td></tr>`;
   }
-  if (!d.buoys.length) b += `<tr><td class="l dimt" colspan="9">NO BUOY DATA</td></tr>`;
+  if (!d.buoys.length) b += `<tr><td class="l dimt" colspan="10">NO BUOY DATA</td></tr>`;
   $("t-b").innerHTML = b + "</tbody>";
+
+  let u = `<thead><tr><th class="l">STN</th><th class="l">NAME</th><th>TIME</th><th>STAGE</th><th>24H Δ</th><th class="l">TREND</th><th>FLOW CFS</th><th>ST</th></tr></thead><tbody>`;
+  for (const s of d.usgs) {
+    const st = s.floodLvl ? `<span class="r">FLD</span>` : s.alert ? `<span class="y">ALR</span>` : s.stale ? `<span class="dimt">OLD</span>` : "OK";
+    const tcls = s.change24hFt != null && s.change24hFt >= RISE.r ? "r" : s.change24hFt != null && s.change24hFt >= RISE.y ? "y" : "";
+    u += `<tr data-id="${esc(s.id)}" class="${rowCls(s, s.floodLvl ? " hot" : "")}">${btn(s)}` +
+      `<td class="l">${short(s.name)}</td><td>${s.updated ? hhmm(s.updated, tz) : "--"}</td>` +
+      `<td>${num(s.stageFt, 2)}</td><td><span class="${tcls}">${sgn(s.change24hFt)}</span></td>` +
+      `<td class="l"><span class="${tcls}">${trendArrow(s)} ${trendWord(s)}</span></td><td>${cfs(s.flowCfs)}</td><td>${st}</td></tr>`;
+  }
+  if (!d.usgs.length) u += `<tr><td class="l dimt" colspan="8">NO STREAM GAUGES IN THIS REGION</td></tr>`;
+  $("t-u").innerHTML = u + "</tbody>";
+
   // keep the selected row visible inside its own scroller (never scroll the page)
-  const row = document.querySelector(".tbl tr.sel");
+  const row = document.querySelector(".tbl table:not([hidden]) tr.sel");
   if (row) {
     const box = row.closest(".tbl-b");
     const head = row.closest("table").tHead?.offsetHeight || 0;
@@ -839,10 +1047,23 @@ function renderMapTag() {
   const d = state.data;
   const r = R();
   const met = d ? d.buoys.filter((b) => b.windOnly).length : 0;
-  $("map-tag").innerHTML = `<b>${esc(r.name)}</b>${d && d.region === state.region ? ` · ${d.gauges.length} GAUGES · ${d.buoys.length - met} BUOYS${met ? ` · ${met} WIND STN` : ""}` : " · ACQUIRING"}`;
+  $("map-tag").innerHTML = `<b>${esc(r.name)}</b>${d && d.region === state.region ? ` · ${d.gauges.length} TIDE · ${d.buoys.length - met} BUOY${met ? ` · ${met} MET` : ""}${d.usgs.length ? ` · ${d.usgs.length} STREAM` : ""}` : " · ACQUIRING"}`;
 }
 
 function renderMenu() {
+  const box = $("m-region");
+  const have = [...box.querySelectorAll("[data-region]")].map((b) => b.dataset.region).join();
+  if (have !== REGION_IDS.join()) {
+    for (const b of box.querySelectorAll("[data-region]")) b.remove();
+    for (const id of REGION_IDS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.dataset.region = id;
+      b.textContent = REGIONS[id].code;
+      box.append(b);
+    }
+  }
   for (const b of document.querySelectorAll("#m-region [data-region]")) {
     const on = b.dataset.region === state.region;
     b.setAttribute("aria-checked", on ? "true" : "false");
@@ -876,20 +1097,23 @@ function select(id, { pan = true, remember = true } = {}) {
   if (!st) return;
   state.selId = id;
   state.want = id;
+  state.tab = st.kind;
   if (remember) savePick(state.region, id);
   updateMarkerStates();
   renderRoster();
   renderStation();
   writeUrl();
   if (pan && map && !map.getBounds().contains([st.lon, st.lat])) map.easeTo({ center: [st.lon, st.lat], duration: 500 });
-  const v = st.kind === "g" ? (st.latest ? `${st.latest.v.toFixed(2)} feet` : "no reading") : st.waveFt != null ? `waves ${st.waveFt} feet` : "no wave reading";
+  const v = st.kind === "g" ? (st.latest ? `${st.latest.v.toFixed(2)} feet` : "no reading")
+    : st.kind === "u" ? (st.stageFt != null ? `stage ${st.stageFt} feet, ${trendWord(st).toLowerCase()}` : "no reading")
+    : st.waveFt != null ? `waves ${st.waveFt} feet` : st.levelFt != null ? `water level ${st.levelFt} feet` : "no wave reading";
   announce(`${st.name}, ${v}${st.floodLvl ? ", flooding" : ""}${st.alert ? ", alert" : ""}`);
 }
 
 function stepStation(dir) {
   const d = state.data;
   if (!d) return;
-  const list = [...(state.layers.g ? d.gauges : []), ...(state.layers.b ? d.buoys : [])];
+  const list = [...(state.layers.g ? d.gauges : []), ...(state.layers.b ? d.buoys : []), ...(state.layers.u ? d.usgs : [])];
   if (!list.length) return;
   const i = list.findIndex((s) => s.id === state.selId);
   select(list[(i + dir + list.length) % list.length].id);
@@ -1017,8 +1241,8 @@ function writeUrl() {
 async function locateStation(id) {
   for (const r of REGION_IDS) {
     if (r === state.region) continue;
-    const res = await Promise.allSettled([getSnap("tides", r), getSnap("buoys", r)]);
-    const ids = [...(res[0].value?.data?.stations || []), ...(res[1].value?.data?.buoys || [])].map((s) => String(s.id).toUpperCase());
+    const res = await Promise.allSettled([getSnap("tides", r), getSnap("buoys", r), getSnap("gauges", r)]);
+    const ids = [...(res[0].value?.data?.stations || []), ...(res[1].value?.data?.buoys || []), ...(res[2].value?.data?.gauges || [])].map((s) => String(s.id).toUpperCase());
     if (ids.includes(id)) return r;
   }
   return null;
@@ -1034,7 +1258,7 @@ function wire() {
   $("help-x").addEventListener("click", () => { toggleHelp(false); $("m-help").focus(); });
 
   // roving arrows inside the two radio groups
-  for (const gid of ["m-region", "m-win", "m-theme"]) {
+  for (const gid of ["m-region", "m-win", "m-theme", "r-tabs"]) {
     $(gid)?.addEventListener("keydown", (e) => {
       if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
       const btns = [...$(gid).querySelectorAll("button")];
@@ -1048,7 +1272,14 @@ function wire() {
     });
   }
 
-  for (const tid of ["t-g", "t-b"]) {
+  $("r-tabs")?.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b || b.dataset.tab === state.tab) return;
+    state.tab = b.dataset.tab;
+    b.closest(".tbl").querySelector(".tbl-b").scrollTop = 0;
+    renderRoster();
+  });
+  for (const tid of ["t-g", "t-b", "t-u"]) {
     $(tid).addEventListener("click", (e) => { const tr = e.target.closest("tr[data-id]"); if (tr) select(tr.dataset.id); });
   }
 
@@ -1064,6 +1295,7 @@ function wire() {
     else if (k === "r" || k === "R") { const i = REGION_IDS.indexOf(state.region); setRegion(REGION_IDS[(i + (e.shiftKey ? -1 : 1) + REGION_IDS.length) % REGION_IDS.length]); }
     else if (k === "g" || k === "G") toggleLayer("g");
     else if (k === "b" || k === "B") toggleLayer("b");
+    else if (k === "s" || k === "S") toggleLayer("u");
     else if (k === "f" || k === "F") toggleLayer("r");
     else if (k === "a" || k === "A") toggleLayer("a");
     else if (k === "t" || k === "T") setTheme(state.theme === "light" ? "crt" : "light", true);

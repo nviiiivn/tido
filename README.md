@@ -2,13 +2,13 @@
 
 **Tide · wave telemetry on a retro instrument screen.**
 
-![TIDO in the light theme: SF Bay Area map with tide gauges and buoys, a segmented LED water-level meter, water-level and surge graphs, station rosters and a raw feed](docs/screenshots/light-desktop.png)
+![TIDO in the light theme: SF Bay Area map with tide gauges, buoys and stream gauges, a segmented LED water-level meter, water-level and surge graphs, station rosters and a raw feed](docs/screenshots/light-desktop.png)
 
-TIDO is a single static web page that shows live NOAA tide gauges, wave buoys and shore wind sensors the way an old
-telemetry console would: a region map with station markers, segmented LED meters, observed-vs-predicted water level
-and storm-surge graphs, flood and alert lamps, station rosters and a raw data feed. It covers four regions (SF Bay
-Area, Puget Sound, Los Angeles / SoCal and Miami / South Florida), looks back 1 hour to 3 days, and comes in a paper
-LIGHT theme and a black-and-green CRT theme. There is no build step and no framework; the page reads ready-made
+TIDO is a single static web page that shows live NOAA tide gauges, NDBC wave buoys and shore stations, and USGS
+stream gauges the way an old telemetry console would: a region map with station markers, segmented LED meters,
+observed-vs-predicted water level and storm-surge graphs, flood and alert lamps, station rosters and a raw data feed.
+It covers three regions (SF Bay Area, Puget Sound and Miami / South Florida), looks back 1 hour to 3 days, and comes
+in a paper LIGHT theme and a black-and-green CRT theme. There is no build step and no framework; the page reads ready-made
 JSON snapshots from the [Coast Watch](https://github.com/nviiiivn/jetski/tree/tides-alola) data server, which also
 serves the page itself.
 
@@ -25,21 +25,28 @@ serves the page itself.
 ## Features
 
 - **Region map** (MapLibre GL, OpenStreetMap vector tiles in a two-colour style per theme) with tide gauges, wave
-  buoys, shore wind stations, flood reports, flooding river/tide gauges and NWS coastal flood alert areas. Gauges,
-  buoys, flood reports and alert areas can each be switched off.
+  buoys, shore met stations, USGS stream gauges (marked rising or falling over 24 h), flood reports, flooding NWPS
+  gauges and NWS flood alert areas. Tide gauges, buoys, stream gauges, flood reports and alert areas can each be
+  switched off.
 - **Tide gauges:** biggest water level in the time window, the latest reading and the next predicted high tide;
   a segmented LED history meter that turns yellow above MHHW and red above the minor flood level; bars for level vs.
   the flood threshold and for surge (observed minus predicted); graphs of observed vs. predicted water level with
   upcoming highs and lows, and of the surge residual.
 - **Buoys:** wave height history meter (yellow from 8 ft, red from 12 ft), wind speed and dominant wave period bars,
-  significant wave height and sea surface temperature graphs. Wind-only stations show wind speed and direction.
-- **Lamps and reasons:** FLOOD (gauge at or above its NOAA/NWS flood level) or GALE (wind 34 kt and up), and ALERT
-  when an NWS coastal flood product covers the station within 10 km, a flood report came in within 15 km in the last
-  24 h, or a nearby NWPS gauge is flooding. The line under the lamps says which.
-- **Header:** region, an alert summary for the whole region, local and UTC clocks, and the data link state
+  significant wave height and sea surface temperature graphs. Shore stations without waves show wind speed and
+  direction. Stations that also report water level (NDBC) show the reading, and those with no waves (such as the
+  Florida Bay stations) get a water level meter and graph instead.
+- **Stream gauges (USGS):** creek, river, canal and Bay gauges near the cities. Stage in feet above the gauge's own
+  zero, change over 24 h (rising / steady / falling), discharge in cubic feet per second, a stage graph and a rate of
+  change graph in feet per hour. Each station links to its USGS page.
+- **Lamps and reasons:** FLOOD (tide gauge at or above its NOAA/NWS flood level, or NOAA's river service reporting
+  flooding at a stream gauge's site) or GALE (wind 34 kt and up), and ALERT when an NWS flood product covers the
+  station (coastal products within 10 km), a flood report came in within 15 km in the last 24 h, or a nearby NWPS
+  gauge is flooding. The line under the lamps says which.
+- **Header:** region, a summary of coastal and inland flood alerts for the whole region, local and UTC clocks, and the data link state
   (LINK OK / PARTIAL / LOST, with the failing source in the tooltip).
-- **Rosters:** every gauge and buoy in the region with its latest values and state; click a row to select it.
-  The raw feed lists every reading of the selected station in the time window.
+- **Rosters:** three tabs (TIDE, BUOY + MET, STREAM) list every station in the region with its latest values and
+  state; click a row to select it. The raw feed lists every reading of the selected station in the time window.
 - **Timeline:** 1H, 6H, 24H or 3D for every graph, meter and report.
 - **Themes:** LIGHT (default) and CRT with scanlines. The choice is saved in the browser.
 - **Links you can share:** the address keeps the region, station and time window, e.g.
@@ -57,7 +64,8 @@ serves the page itself.
 | `J` / `K` or `→` / `←` | Next / previous station |
 | `1` `2` `3` `4` | Timeline 1H · 6H · 24H · 3D |
 | `R` / `Shift+R` | Next / previous region |
-| `G` `B` `F` `A` | Toggle gauges · buoys · flood reports · NWS alerts |
+| `G` `B` `S` `F` `A` | Toggle tide gauges · buoys · stream gauges · flood reports · NWS alerts |
+| `←` / `→` on the roster tabs | Switch between TIDE, BUOY + MET and STREAM |
 | `T` | Theme LIGHT / CRT |
 | `Tab` | Move through map markers, rosters and menu |
 | `?` / `Esc` | Show / hide the key list (Esc also closes a map popup) |
@@ -67,13 +75,14 @@ serves the page itself.
 ```
 browser ── GET /                       ─┐
         ── GET /snapshot/tides?region=  │   Coast Watch server (Node, server/serve.mjs)
-        ── GET /snapshot/buoys?region=  ├─▶   /snapshot/*  → builds + caches JSON from NOAA / NWS / IEM
-        ── GET /snapshot/weather?...    │   everything else → TIDO's files (this repo)
-        ── GET /snapshot/floods?...    ─┘
+        ── GET /snapshot/buoys?region=  │     /snapshot/*  → builds + caches JSON from
+        ── GET /snapshot/weather?...    ├─▶                  NOAA / NWS / USGS / IEM
+        ── GET /snapshot/floods?...     │     everything else → TIDO's files (this repo)
+        ── GET /snapshot/gauges?...    ─┘
         ── map tiles + fonts ──────────────▶ tiles.openstreetmap.us
 ```
 
-TIDO has no server code of its own. `app.js` fetches `/snapshot/{tides,buoys,weather,floods}?region=…` from the
+TIDO has no server code of its own. `app.js` fetches `/snapshot/{tides,buoys,weather,floods,gauges}?region=…` from the
 same origin it was loaded from, so it must be served by the Coast Watch data server (or by a proxy in front of it
 on the same host name). Coast Watch's `server/serve.mjs` serves TIDO's folder in two cases:
 
@@ -85,8 +94,8 @@ Any other host name and path gets Coast Watch's own dashboard. The server finds 
 
 ## Run it on your own server
 
-You need **Node.js 20 or newer**, **git**, and outbound HTTPS from the server to the NOAA, NWS and Iowa Mesonet
-APIs (no API keys are needed). Viewers' browsers load map tiles directly from `tiles.openstreetmap.us`.
+You need **Node.js 20 or newer**, **git**, and outbound HTTPS from the server to the NOAA, NWS, USGS and Iowa
+Mesonet APIs (no API keys are needed). Viewers' browsers load map tiles directly from `tiles.openstreetmap.us`.
 
 ### 1. Clone both repositories side by side
 
@@ -129,17 +138,17 @@ All optional, set as environment variables for `npm start`:
 | `PORT` | `8970` | Port to listen on |
 | `HOST` | `127.0.0.1` | Address to listen on. Keep the default behind a reverse proxy; use `0.0.0.0` to reach it from other machines directly |
 | `TIDO_DIR` | `../tido` (next to Coast Watch) | Folder with TIDO's `index.html`. Use an absolute path |
-| `UPSTREAM_TIMEOUT_MS` | `15000` | Timeout in milliseconds for each request to NOAA / NWS / IEM |
+| `NWS_USER_AGENT` | `(coast-watch, self-hosted tide and coast dashboard)` | `User-Agent` sent to api.weather.gov. Set it to your own site and a contact address |
+| `UPSTREAM_TIMEOUT_MS` | `15000` | Timeout in milliseconds for each request to NOAA / NWS / USGS / IEM |
 
-Example with TIDO somewhere else:
+Example with TIDO somewhere else and your own NWS identity:
 
 ```sh
-PORT=8970 TIDO_DIR=/srv/tido npm start
+PORT=8970 TIDO_DIR=/srv/tido NWS_USER_AGENT="(tido.example.com, you@example.com)" npm start
 ```
 
-The National Weather Service asks every API client to identify itself in its `User-Agent`. Coast Watch sends a fixed
-one, set as `NWS_USER_AGENT` in `coast-watch/server/serve.mjs`; change it to your own site name and a contact address
-when you run your own copy.
+The National Weather Service asks every API client to identify itself in its `User-Agent`, with a way to reach you,
+so set `NWS_USER_AGENT` when you run your own copy.
 
 ### Put it on a host name
 
@@ -210,6 +219,7 @@ WorkingDirectory=/opt/tide-station/coast-watch
 Environment=PORT=8970
 Environment=HOST=127.0.0.1
 Environment=TIDO_DIR=/opt/tide-station/tido
+Environment="NWS_USER_AGENT=(tido.example.com, you@example.com)"
 # use the path that `command -v node` prints
 ExecStart=/usr/bin/node server/serve.mjs
 Restart=on-failure
@@ -273,10 +283,11 @@ All station data is fetched and cached by the Coast Watch data server:
 
 - [NOAA CO-OPS Tides & Currents](https://tidesandcurrents.noaa.gov/): observed and predicted water levels, high/low
   tide predictions, water temperature, MHHW and flood thresholds (datum MLLW).
-- [NOAA National Data Buoy Center](https://www.ndbc.noaa.gov/): wave height, dominant period, wind and sea surface
-  temperature from buoys and shore stations.
-- [National Weather Service API](https://api.weather.gov/) (api.weather.gov): coastal flood and marine alerts and their
-  areas.
+- [NOAA National Data Buoy Center](https://www.ndbc.noaa.gov/): wave height, dominant period, wind, sea surface
+  temperature and water level from buoys and shore stations.
+- [USGS Water Services](https://waterservices.usgs.gov/) instantaneous values: stream gauge stage and discharge.
+- [National Weather Service API](https://api.weather.gov/) (api.weather.gov): coastal, inland flood and marine alerts
+  and their areas.
 - [Iowa Environmental Mesonet](https://mesonet.agron.iastate.edu/) Local Storm Reports: NWS flood reports from
   spotters, officials and the public.
 - [NOAA National Water Prediction Service](https://water.noaa.gov/): gauges at action stage or flooding.
@@ -292,7 +303,7 @@ Map and page:
 - The data server is [Coast Watch](https://github.com/nviiiivn/jetski/tree/tides-alola), a self-hosted fork of
   [Bay Coast Watch](https://github.com/rishabhbajpailab/jetski).
 
-TIDO is not affiliated with NOAA or the National Weather Service.
+TIDO is not affiliated with NOAA, the National Weather Service or the USGS.
 
 ## License
 
