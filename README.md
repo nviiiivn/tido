@@ -296,5 +296,5 @@ TIDO is not affiliated with NOAA or the National Weather Service.
 
 ## License
 
-[MIT](LICENSE) © 2026 nviiiivn. The bundled MapLibre GL JS and IBM Plex files keep their own licences (see
-[LICENSE](LICENSE) and `vendor/`).
+[MIT](LICENSE) © 2026 nviiiivn. The bundled MapLibre GL JS and IBM Plex files keep their own licences, listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
