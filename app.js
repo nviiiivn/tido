@@ -1181,6 +1181,8 @@ function cookieTheme() {
   const m = document.cookie.match(/(?:^|;\s*)alola-theme=([^;]*)/);
   let v = "";
   try { v = m ? decodeURIComponent(m[1]).trim().toLowerCase() : ""; } catch { v = ""; }
+  // "alola" without alola-theme-picked=alola is EMON's old unasked default (before 2026-11-25), not a choice
+  if (v === "alola" && !/(?:^|;\s*)alola-theme-picked=alola(?:;|$)/.test(document.cookie)) v = "";
   return LIGHT_SITE_THEMES.has(v) ? "light" : "crt";
 }
 function initialTheme() {

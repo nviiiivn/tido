@@ -15,6 +15,8 @@
   if (t !== "light" && t !== "crt") {
     var m = document.cookie.match(/(?:^|;\s*)alola-theme=([^;]*)/), v = "";
     try { v = m ? decodeURIComponent(m[1]).trim().toLowerCase() : ""; } catch (e) {}
+    // "alola" without alola-theme-picked=alola is EMON's old unasked default (before 2026-11-25), not a choice
+    if (v === "alola" && !/(?:^|;\s*)alola-theme-picked=alola(?:;|$)/.test(document.cookie)) v = "";
     t = (!v || v === "white" || v === "light" || v === "sepia") ? "light" : "crt";
   }
   document.documentElement.setAttribute("data-theme", t);
