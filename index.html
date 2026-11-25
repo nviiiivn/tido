@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TIDO · coastal telemetry</title>
+<meta name="description" content="Live tide gauges and wave buoys on a green phosphor telemetry screen.">
+<meta name="theme-color" content="#f3f2ea">
+<script>
+/* Theme before first paint: a saved TIDO choice wins; else the alola.lol site cookie
+   (missing, "white", "light" or "sepia" = LIGHT; any other value = CRT). LIGHT is the default. */
+(function () {
+  var t = null;
+  try { t = localStorage.getItem("tido.theme"); } catch (e) {}
+  if (t !== "light" && t !== "crt") {
+    var m = document.cookie.match(/(?:^|;\s*)alola-theme=([^;]*)/), v = "";
+    try { v = m ? decodeURIComponent(m[1]).trim().toLowerCase() : ""; } catch (e) {}
+    t = (!v || v === "white" || v === "light" || v === "sepia") ? "light" : "crt";
+  }
+  document.documentElement.setAttribute("data-theme", t);
+})();
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23000'/%3E%3Cpath d='M3 20c4-6 7-6 10 0s6 6 10 0 5-4 6-2' fill='none' stroke='%2339ff6a' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<link rel="stylesheet" href="style.css">
+<script src="vendor/maplibre-gl.js" defer></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div class="app">
+  <header class="hd">
+    <div class="brand"><b>TIDO</b><span>TIDE · WAVE<br>TELEMETRY</span></div>
+    <div class="hd-reg"><span class="k">REGION</span><b id="hd-region">SF BAY AREA</b></div>
+    <div class="hd-alert" id="hd-alert" aria-live="polite"></div>
+    <div class="hd-clock" aria-label="Clock"><b id="clk-local">--:--:--</b><span id="clk-tz"></span><span class="utc" id="clk-utc">--:--:--Z</span></div>
+    <div class="hd-link" id="hd-link" data-s="init"><i></i><span>INIT</span></div>
+  </header>
+
+  <main class="grid">
+    <section class="pnl map-pnl" aria-label="Region map. Select a tide gauge or buoy.">
+      <div id="map"></div>
+      <div class="map-ticks" aria-hidden="true"></div>
+      <div class="map-tag" id="map-tag">REGION ----</div>
+      <div class="map-legend" aria-hidden="true">
+        <span><i class="lg lg-g"></i>GAUGE</span>
+        <span><i class="lg lg-b"></i>BUOY</span>
+        <span><i class="lg lg-m"></i>WIND STN</span>
+        <span><i class="lg lg-r"></i>FLOOD RPT</span>
+        <span><i class="lg lg-al"></i>ALERT</span>
+        <span><i class="lg lg-a"></i>NWS FLOOD AREA</span>
+      </div>
+    </section>
+
+    <section class="hm" aria-label="Bar meters">
+      <div class="hbar">
+        <div class="hbar-main">
+          <div class="hbar-svg svgbox" id="hm1"></div>
+          <div class="hbar-num"><b id="hm1-v">--</b><small id="hm1-u">FT</small></div>
+        </div>
+        <div class="lbl" id="hm1-l">WATER LEVEL</div>
+      </div>
+      <div class="hbar">
+        <div class="hbar-main">
+          <div class="hbar-svg svgbox" id="hm2"></div>
+          <div class="hbar-num"><b id="hm2-v">--</b><small id="hm2-u">FT</small></div>
+        </div>
+        <div class="lbl" id="hm2-l">SURGE / RESIDUAL</div>
+      </div>
+    </section>
+
+    <section class="mid" aria-label="Readout">
+      <div class="readout" id="readout"><span class="ro-k" id="ro-k">MAX</span><b id="ro-v">--.-</b><span class="ro-u" id="ro-u">FT</span></div>
+      <div class="ro-sub" id="ro-sub">ACQUIRING SIGNAL</div>
+      <div class="lamps"><span class="lamp" id="lamp1">FLOOD</span><span class="lamp" id="lamp2">ALERT</span></div>
+      <div class="ro-why" id="ro-why"></div>
+      <div class="vmeter svgbox" id="vm"></div>
+      <div class="lbl" id="vm-l">WATER LEVEL</div>
+    </section>
+
+    <section class="graphs" aria-label="Graphs">
+      <figure class="gr">
+        <figcaption><span class="lbl" id="g1-l">WATER LEVEL</span><span class="leg" id="g1-leg"></span></figcaption>
+        <div class="gr-svg svgbox" id="g1"></div>
+      </figure>
+      <figure class="gr">
+        <figcaption><span class="lbl" id="g2-l">SURGE</span><span class="leg" id="g2-leg"></span></figcaption>
+        <div class="gr-svg svgbox" id="g2"></div>
+      </figure>
+    </section>
+
+    <section class="ident" aria-label="Station">
+      <div class="badge" id="badge"><b id="badge-1">----</b><span id="badge-2">STATION</span></div>
+      <div class="coords">
+        <div class="co-meta" id="co-meta">NO STATION SELECTED</div>
+        <div class="co-line" id="co-line">LATITUDE --/--/--.- N - LONGITUDE ---/--/--.- W</div>
+      </div>
+    </section>
+
+    <section class="tables" aria-label="Raw readings">
+      <div class="tbl"><div class="tbl-h">GAUGE ROSTER <span>LATEST · FT MLLW</span></div><div class="tbl-b"><table id="t-g"></table></div></div>
+      <div class="tbl"><div class="tbl-h">BUOY + WIND ROSTER <span>LATEST · FT · S · KT · °F</span></div><div class="tbl-b"><table id="t-b"></table></div></div>
+      <div class="tbl"><div class="tbl-h" id="t-raw-h">RAW FEED</div><div class="tbl-b"><table id="t-raw"></table></div></div>
+    </section>
+  </main>
+
+  <nav class="menu" aria-label="Controls">
+    <div class="mgrp" role="radiogroup" aria-label="Region" id="m-region">
+      <span class="mh">REGION <kbd>R</kbd></span>
+      <button type="button" role="radio" data-region="sfbay">SFBAY</button>
+      <button type="button" role="radio" data-region="puget">PUGET</button>
+      <button type="button" role="radio" data-region="la">LA</button>
+      <button type="button" role="radio" data-region="sfla">SFLA</button>
+    </div>
+    <div class="mgrp" role="radiogroup" aria-label="Timeline" id="m-win">
+      <span class="mh">TIME <kbd>1-4</kbd></span>
+      <button type="button" role="radio" data-win="1h">1H</button>
+      <button type="button" role="radio" data-win="6h">6H</button>
+      <button type="button" role="radio" data-win="24h">24H</button>
+      <button type="button" role="radio" data-win="3d">3D</button>
+    </div>
+    <div class="mgrp" role="group" aria-label="Map layers" id="m-layers">
+      <span class="mh">LAYERS</span>
+      <button type="button" data-layer="g" aria-label="Gauges"><kbd>G</kbd><span class="w">AUGES</span></button>
+      <button type="button" data-layer="b" aria-label="Buoys"><kbd>B</kbd><span class="w">UOYS</span></button>
+      <button type="button" data-layer="r" aria-label="Flood reports"><kbd>F</kbd><span class="w">LOOD RPTS</span></button>
+      <button type="button" data-layer="a" aria-label="NWS flood alerts"><kbd>A</kbd><span class="w">LERTS</span></button>
+    </div>
+    <div class="mgrp" role="radiogroup" aria-label="Theme" id="m-theme">
+      <span class="mh">THEME <kbd>T</kbd></span>
+      <button type="button" role="radio" data-theme-set="light" aria-checked="true">LIGHT</button>
+      <button type="button" role="radio" data-theme-set="crt" aria-checked="false">CRT</button>
+    </div>
+    <button type="button" class="mhelp" id="m-help" aria-expanded="false" aria-controls="help"><kbd>?</kbd><span class="w"> KEYS</span></button>
+  </nav>
+
+  <footer class="ft">
+    <span>data: NOAA CO-OPS · NDBC · NWS</span>
+    <span class="ft-map">map © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors · <a href="https://openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> · <a href="https://tiles.openstreetmap.us/" target="_blank" rel="noopener">OSM US</a></span>
+  </footer>
+
+  <div class="help" id="help" hidden role="dialog" aria-label="Keyboard controls">
+    <div class="help-h">KEYBOARD <button type="button" id="help-x" aria-label="Close">×</button></div>
+    <dl>
+      <dt>J / K &nbsp;·&nbsp; ← / →</dt><dd>NEXT / PREVIOUS STATION</dd>
+      <dt>1 2 3 4</dt><dd>TIMELINE 1H · 6H · 24H · 3D</dd>
+      <dt>R / SHIFT+R</dt><dd>NEXT / PREVIOUS REGION</dd>
+      <dt>G B F A</dt><dd>GAUGES · BUOYS · FLOOD REPORTS · ALERTS</dd>
+      <dt>T</dt><dd>THEME LIGHT / CRT</dd>
+      <dt>TAB</dt><dd>MOVE THROUGH MAP MARKERS, ROSTERS, MENU</dd>
+      <dt>?  /  ESC</dt><dd>SHOW / HIDE THIS PANEL</dd>
+    </dl>
+  </div>
+  <div class="sr" aria-live="polite" id="live"></div>
+</div>
+</body>
+</html>
